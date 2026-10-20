@@ -1,0 +1,478 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Keyboard dialog prototype</title>
+        <script
+            type="module"
+            blocking="render"
+            src="https://js.arcgis.com/calcite-components/5.1"
+        ></script>
+
+        <style>
+            body {
+                align-items: center;
+                background: var(--calcite-color-foreground-2);
+                display: flex;
+                justify-content: center;
+                margin: 0;
+                min-height: 100vh;
+            }
+
+            #example-dialog {
+                --calcite-dialog-offset-x: 0px;
+                --calcite-dialog-offset-y: 0px;
+                --calcite-dialog-max-size-x: calc(100vw - 32px);
+                --calcite-dialog-max-size-y: calc(100vh - 32px);
+                --calcite-dialog-size-x: 512px;
+                --calcite-dialog-size-y: 424px;
+            }
+
+            #dialog-content {
+                line-height: 1.55;
+            }
+
+            #dialog-content a {
+                color: var(--calcite-color-text-link);
+            }
+
+            #dialog-actions {
+                align-self: auto;
+                block-size: max-content;
+                inline-size: max-content;
+                inset: auto;
+                max-inline-size: calc(100vw - 24px);
+                margin-inline-start: auto;
+                opacity: 0;
+                overflow: visible;
+                pointer-events: none;
+                position: fixed;
+                z-index: var(--calcite-z-index-overlay);
+            }
+
+            #dialog-actions[data-visible] {
+                opacity: 1;
+                pointer-events: auto;
+            }
+
+        </style>
+    </head>
+
+    <body>
+        <calcite-button id="example-button">Open</calcite-button>
+
+        <calcite-dialog
+            id="example-dialog"
+            heading="Terms and conditions"
+            modal
+            placement="center"
+            tabindex="-1"
+        >
+            <calcite-action-bar
+                id="dialog-actions"
+                slot="action-bar"
+                aria-label="Dialog controls"
+                expanded
+                expand-disabled
+                floating
+                layout="horizontal"
+                overflow-actions-disabled
+            >
+                <calcite-action
+                    id="move-action"
+                    icon="move"
+                    text="Move"
+                ></calcite-action>
+                <calcite-action
+                    id="resize-action"
+                    icon="caret-double-horizontal"
+                    text="Resize"
+                ></calcite-action>
+            </calcite-action-bar>
+
+            <div id="dialog-content">
+                <p>To continue, you must agree to the terms.</p>
+
+                <calcite-label>
+                    Verify your phone number
+                    <calcite-input
+                        type="tel"
+                        placeholder="(720) 555-9898"
+                    ></calcite-input>
+                </calcite-label>
+
+                <calcite-link href="#">Why is this required?</calcite-link>
+
+                <p>
+                    Your <a href="#">current home page configuration</a> will no
+                    longer be supported in ArcGIS Online after 2021. To ensure
+                    your home page is compatible with future updates, please
+                    launch the home page editor to create your new home page and
+                    switch to it when ready.
+                </p>
+
+                <calcite-label layout="inline">
+                    <calcite-checkbox></calcite-checkbox>
+                    I agree to the terms
+                </calcite-label>
+            </div>
+
+            <calcite-button
+                id="cancel-button"
+                slot="footer-end"
+                appearance="outline"
+            >
+                Cancel
+            </calcite-button>
+            <calcite-button id="agree-button" slot="footer-end">
+                I agree
+            </calcite-button>
+        </calcite-dialog>
+
+        <script type="module">
+            const KEYBOARD_STEP = 10;
+            const MINIMUM_WIDTH = 320;
+            const MINIMUM_HEIGHT = 280;
+            const VIEWPORT_PADDING = 16;
+
+            const openButton = document.getElementById("example-button");
+            const dialog = document.getElementById("example-dialog");
+            const actionBar = document.getElementById("dialog-actions");
+            const moveAction = document.getElementById("move-action");
+            const resizeAction = document.getElementById("resize-action");
+            const cancelButton = document.getElementById("cancel-button");
+            const agreeButton = document.getElementById("agree-button");
+
+            let activeMode = null;
+            let dialogX = 0;
+            let dialogY = 0;
+            let dialogWidth = 512;
+            let dialogHeight = 424;
+
+            function showActionBar() {
+                actionBar.setAttribute("data-visible", "");
+                    requestAnimationFrame(function () {
+                        positionActionBar();
+                        requestAnimationFrame(positionActionBar);
+                    });
+            }
+
+            function hideActionBar() {
+                actionBar.removeAttribute("data-visible");
+            }
+
+            function setActionState(action, active) {
+                action.active = active;
+                action.aria = { pressed: String(active) };
+            }
+
+            function resetModeState() {
+                activeMode = null;
+                setActionState(moveAction, false);
+                setActionState(resizeAction, false);
+                dialog.removeAttribute("data-keyboard-mode");
+                dialog.removeAttribute("aria-label");
+                removeDialogContainerFocusStyle();
+                hideActionBar();
+            }
+
+            async function resetDialogGeometry() {
+                const availableWidth = Math.max(
+                    1,
+                    window.innerWidth - VIEWPORT_PADDING * 2
+                );
+                const availableHeight = Math.max(
+                    1,
+                    window.innerHeight - VIEWPORT_PADDING * 2
+                );
+
+                dialogX = 0;
+                dialogY = 0;
+                dialogWidth = Math.min(512, availableWidth);
+                dialogHeight = Math.min(424, availableHeight);
+                await updateDialogGeometry();
+            }
+
+            async function updateDialogGeometry() {
+                dialog.style.setProperty("--calcite-dialog-offset-x", `${dialogX}px`);
+                dialog.style.setProperty("--calcite-dialog-offset-y", `${dialogY}px`);
+                await dialog.updateSize({
+                    inline: dialogWidth,
+                    block: dialogHeight
+                });
+                positionActionBar();
+            }
+
+            function getDialogContainer() {
+                const container = dialog.shadowRoot?.querySelector(".dialog");
+
+                if (!container) {
+                    throw new Error("Calcite dialog container was not found.");
+                }
+
+                return container;
+            }
+
+            function positionActionBar() {
+                const dialogContainer =
+                    dialog.shadowRoot?.querySelector(".dialog");
+
+                if (!dialogContainer) {
+                    return;
+                }
+
+                const dialogBounds = dialogContainer.getBoundingClientRect();
+                const actionBarBounds = actionBar.getBoundingClientRect();
+                const headerInset = 1;
+                const maximumLeft =
+                    window.innerWidth - actionBarBounds.width - headerInset;
+                const desiredLeft =
+                    dialogBounds.right - actionBarBounds.width - headerInset;
+                const left = Math.max(
+                    headerInset,
+                    Math.min(desiredLeft, maximumLeft)
+                );
+
+                actionBar.style.insetBlockStart =
+                    `${dialogBounds.top + headerInset}px`;
+                actionBar.style.insetInlineStart = `${left}px`;
+            }
+
+            function focusDialogContainer() {
+                const container = getDialogContainer();
+                container.tabIndex = -1;
+                container.style.outline =
+                    "2px solid var(--calcite-color-brand)";
+                container.style.outlineOffset = "2px";
+                container.style.transition = "none";
+                container.focus();
+            }
+
+            function removeDialogContainerFocusStyle() {
+                const container = dialog.shadowRoot?.querySelector(".dialog");
+
+                if (!container) {
+                    return;
+                }
+
+                container.style.removeProperty("outline");
+                container.style.removeProperty("outline-offset");
+                container.style.removeProperty("transition");
+                container.removeAttribute("tabindex");
+            }
+
+            function activateMode(mode) {
+                activeMode = mode;
+                setActionState(moveAction, mode === "move");
+                setActionState(resizeAction, mode === "resize");
+                dialog.setAttribute("data-keyboard-mode", mode);
+                dialog.setAttribute(
+                    "aria-label",
+                    `${mode === "move" ? "Move" : "Resize"} mode active`
+                );
+                const activeAction = mode === "move" ? moveAction : resizeAction;
+                activeAction.blur();
+                focusDialogContainer();
+            }
+
+            async function deactivateMode(focusDirection) {
+                activeMode = null;
+                setActionState(moveAction, false);
+                setActionState(resizeAction, false);
+                dialog.removeAttribute("data-keyboard-mode");
+                dialog.removeAttribute("aria-label");
+                hideActionBar();
+                getDialogContainer().blur();
+
+                if (focusDirection === "backward") {
+                    await agreeButton.setFocus();
+                } else {
+                    await focusDialogCloseButton();
+                }
+
+                await waitForNextFrame();
+                removeDialogContainerFocusStyle();
+            }
+
+            function waitForNextFrame() {
+                return new Promise(function (resolve) {
+                    requestAnimationFrame(resolve);
+                });
+            }
+
+            function focusDialogCloseButton() {
+                return new Promise(function (resolve) {
+                    requestAnimationFrame(async function () {
+                        await dialog.setFocus();
+                        resolve();
+                    });
+                });
+            }
+
+            function getMaximumOffset(size, viewportSize) {
+                return Math.max(0, (viewportSize - size) / 2 - VIEWPORT_PADDING);
+            }
+
+            function keepDialogInViewport() {
+                const maximumX = getMaximumOffset(dialogWidth, window.innerWidth);
+                const maximumY = getMaximumOffset(dialogHeight, window.innerHeight);
+
+                dialogX = Math.max(-maximumX, Math.min(dialogX, maximumX));
+                dialogY = Math.max(-maximumY, Math.min(dialogY, maximumY));
+            }
+
+            function moveDialog(key) {
+                if (key === "ArrowLeft") {
+                    dialogX -= KEYBOARD_STEP;
+                } else if (key === "ArrowRight") {
+                    dialogX += KEYBOARD_STEP;
+                } else if (key === "ArrowUp") {
+                    dialogY -= KEYBOARD_STEP;
+                } else if (key === "ArrowDown") {
+                    dialogY += KEYBOARD_STEP;
+                }
+
+                keepDialogInViewport();
+                updateDialogGeometry();
+            }
+
+            function resizeDialog(key) {
+                const maximumWidth = Math.max(
+                    1,
+                    window.innerWidth - VIEWPORT_PADDING * 2
+                );
+                const maximumHeight = Math.max(
+                    1,
+                    window.innerHeight - VIEWPORT_PADDING * 2
+                );
+                const minimumWidth = Math.min(MINIMUM_WIDTH, maximumWidth);
+                const minimumHeight = Math.min(MINIMUM_HEIGHT, maximumHeight);
+
+                if (key === "ArrowLeft") {
+                    dialogWidth = Math.max(
+                        minimumWidth,
+                        dialogWidth - KEYBOARD_STEP
+                    );
+                } else if (key === "ArrowRight") {
+                    dialogWidth = Math.min(
+                        maximumWidth,
+                        dialogWidth + KEYBOARD_STEP
+                    );
+                } else if (key === "ArrowUp") {
+                    dialogHeight = Math.max(
+                        minimumHeight,
+                        dialogHeight - KEYBOARD_STEP
+                    );
+                } else if (key === "ArrowDown") {
+                    dialogHeight = Math.min(
+                        maximumHeight,
+                        dialogHeight + KEYBOARD_STEP
+                    );
+                }
+
+                keepDialogInViewport();
+                updateDialogGeometry();
+            }
+
+            openButton.addEventListener("click", async function () {
+                await customElements.whenDefined("calcite-dialog");
+                resetModeState();
+                dialog.open = true;
+            });
+
+            dialog.addEventListener("calciteDialogOpen", async function () {
+                await resetDialogGeometry();
+                focusDialogCloseButton();
+            });
+
+            dialog.addEventListener("calciteDialogClose", function () {
+                resetModeState();
+                openButton.focus();
+            });
+
+            actionBar.addEventListener("focusin", function () {
+                showActionBar();
+            });
+
+            actionBar.addEventListener("focusout", function () {
+                requestAnimationFrame(function () {
+                    if (!actionBar.matches(":focus-within") && !activeMode) {
+                        hideActionBar();
+                    }
+                });
+            });
+
+            moveAction.addEventListener("keydown", function (event) {
+                if (event.code === "Space") {
+                    event.preventDefault();
+                    activateMode("move");
+                }
+            });
+
+            resizeAction.addEventListener("keydown", function (event) {
+                if (event.code === "Space") {
+                    event.preventDefault();
+                    activateMode("resize");
+                }
+            });
+
+            dialog.addEventListener("keydown", function (event) {
+                if (event.key === "Tab" && activeMode) {
+                    event.preventDefault();
+                    deactivateMode(event.shiftKey ? "backward" : "forward");
+                    return;
+                }
+
+                if (!activeMode || !event.key.startsWith("Arrow")) {
+                    return;
+                }
+
+                event.preventDefault();
+
+                if (activeMode === "move") {
+                    moveDialog(event.key);
+                } else {
+                    resizeDialog(event.key);
+                }
+            });
+
+            cancelButton.addEventListener("click", function () {
+                dialog.open = false;
+            });
+
+            agreeButton.addEventListener("click", function () {
+                dialog.open = false;
+            });
+
+            agreeButton.addEventListener("keydown", function (event) {
+                if (event.key === "Tab" && !event.shiftKey) {
+                    event.preventDefault();
+                    focusDialogCloseButton();
+                }
+            });
+
+            window.addEventListener("resize", function () {
+                const availableWidth = Math.max(
+                    1,
+                    window.innerWidth - VIEWPORT_PADDING * 2
+                );
+                const availableHeight = Math.max(
+                    1,
+                    window.innerHeight - VIEWPORT_PADDING * 2
+                );
+
+                dialogWidth = Math.min(
+                    dialogWidth,
+                    availableWidth
+                );
+                dialogHeight = Math.min(
+                    dialogHeight,
+                    availableHeight
+                );
+                keepDialogInViewport();
+                updateDialogGeometry();
+            });
+        </script>
+    </body>
+</html>

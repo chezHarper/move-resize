@@ -1,0 +1,623 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Prototype 2: Persistent dialog controls</title>
+        <script
+            type="module"
+            blocking="render"
+            src="https://js.arcgis.com/calcite-components/5.1"
+        ></script>
+
+        <style>
+            body {
+                align-items: center;
+                background: var(--calcite-color-foreground-2);
+                display: flex;
+                justify-content: center;
+                margin: 0;
+                min-height: 100vh;
+            }
+
+            #example-dialog {
+                --calcite-dialog-offset-x: 0px;
+                --calcite-dialog-offset-y: 0px;
+                --calcite-dialog-max-size-x: calc(100vw - 32px);
+                --calcite-dialog-max-size-y: calc(100vh - 32px);
+                --calcite-dialog-size-x: 512px;
+                --calcite-dialog-size-y: 424px;
+            }
+
+            #dialog-content {
+                line-height: 1.55;
+            }
+
+            #dialog-content a {
+                color: var(--calcite-color-text-link);
+            }
+
+            #move-action {
+                cursor: grab;
+            }
+
+            #move-action[data-dragging] {
+                cursor: grabbing;
+            }
+
+            .sr-only {
+                block-size: 1px;
+                clip: rect(0 0 0 0);
+                clip-path: inset(50%);
+                inline-size: 1px;
+                overflow: hidden;
+                position: absolute;
+                white-space: nowrap;
+            }
+
+        </style>
+    </head>
+
+    <body>
+        <calcite-button id="example-button">Open</calcite-button>
+
+        <calcite-dialog
+            id="example-dialog"
+            heading="Move and resize V2"
+            modal
+            placement="center"
+            drag-enabled
+            resizable
+            escape-disabled
+            close-disabled
+            tabindex="-1"
+        >
+            <calcite-action-bar
+                id="dialog-actions"
+                slot="header-actions-end"
+                aria-label="Dialog controls"
+                expanded
+                expand-disabled
+                layout="horizontal"
+                overflow-actions-disabled
+            >
+                <calcite-action
+                    id="move-action"
+                    icon="move"
+                    text="Move"
+                ></calcite-action>
+                <calcite-action
+                    id="resize-action"
+                    icon="caret-double-horizontal"
+                    text="Resize"
+                ></calcite-action>
+                <calcite-action
+                    id="close-action"
+                    icon="x"
+                    text="Close"
+                ></calcite-action>
+            </calcite-action-bar>
+
+            <div id="dialog-content">
+                <p>To continue, you must agree to the terms.</p>
+
+                <calcite-label>
+                    Verify your phone number
+                    <calcite-input
+                        type="tel"
+                        placeholder="(720) 555-9898"
+                    ></calcite-input>
+                </calcite-label>
+
+                <calcite-link href="#">Why is this required?</calcite-link>
+
+                <p>
+                    Your <a href="#">current home page configuration</a> will no
+                    longer be supported in ArcGIS Online after 2021. To ensure
+                    your home page is compatible with future updates, please
+                    launch the home page editor to create your new home page and
+                    switch to it when ready.
+                </p>
+
+                <calcite-label layout="inline">
+                    <calcite-checkbox></calcite-checkbox>
+                    I agree to the terms
+                </calcite-label>
+            </div>
+
+            <calcite-button
+                id="cancel-button"
+                slot="footer-end"
+                appearance="outline"
+            >
+                Cancel
+            </calcite-button>
+            <calcite-button id="agree-button" slot="footer-end">
+                I agree
+            </calcite-button>
+        </calcite-dialog>
+        <div id="live-region" class="sr-only" aria-atomic="true" aria-live="polite"></div>
+
+        <script type="module">
+            const KEYBOARD_STEP = 10;
+            const MINIMUM_WIDTH = 320;
+            const MINIMUM_HEIGHT = 280;
+            const VIEWPORT_PADDING = 16;
+
+            const openButton = document.getElementById("example-button");
+            const dialog = document.getElementById("example-dialog");
+            const actionBar = document.getElementById("dialog-actions");
+            const closeAction = document.getElementById("close-action");
+            const moveAction = document.getElementById("move-action");
+            const resizeAction = document.getElementById("resize-action");
+            const cancelButton = document.getElementById("cancel-button");
+            const agreeButton = document.getElementById("agree-button");
+            const liveRegion = document.getElementById("live-region");
+
+            let activeMode = null;
+            let headerFocusStep = 0;
+            let dragState = null;
+            let suppressMoveClick = false;
+            let dialogX = 0;
+            let dialogY = 0;
+            let dialogWidth = 512;
+            let dialogHeight = 424;
+
+            function setActionState(action, active) {
+                action.active = active;
+                action.aria = { pressed: String(active) };
+            }
+
+            function announce(message) {
+                liveRegion.textContent = "";
+                requestAnimationFrame(function () {
+                    liveRegion.textContent = message;
+                });
+            }
+
+            function resetModeState() {
+                activeMode = null;
+                headerFocusStep = 0;
+                setActionState(moveAction, false);
+                setActionState(resizeAction, false);
+                dialog.removeAttribute("data-keyboard-mode");
+                dialog.removeAttribute("aria-label");
+                removeDialogContainerFocusStyle();
+            }
+
+            async function resetDialogGeometry() {
+                const availableWidth = Math.max(
+                    1,
+                    window.innerWidth - VIEWPORT_PADDING * 2
+                );
+                const availableHeight = Math.max(
+                    1,
+                    window.innerHeight - VIEWPORT_PADDING * 2
+                );
+
+                dialogX = 0;
+                dialogY = 0;
+                dialogWidth = Math.min(512, availableWidth);
+                dialogHeight = Math.min(424, availableHeight);
+                await updateDialogGeometry();
+            }
+
+            async function updateDialogGeometry() {
+                dialog.style.setProperty("--calcite-dialog-offset-x", `${dialogX}px`);
+                dialog.style.setProperty("--calcite-dialog-offset-y", `${dialogY}px`);
+                await dialog.updateSize({
+                    inline: dialogWidth,
+                    block: dialogHeight
+                });
+            }
+
+            function getDialogContainer() {
+                const container = dialog.shadowRoot?.querySelector(".dialog");
+
+                if (!container) {
+                    throw new Error("Calcite dialog container was not found.");
+                }
+
+                return container;
+            }
+
+            function focusDialogContainer() {
+                const container = getDialogContainer();
+                container.tabIndex = -1;
+                container.style.outline =
+                    "2px solid var(--calcite-color-brand)";
+                container.style.outlineOffset = "2px";
+                container.style.transition = "none";
+                container.focus();
+            }
+
+            function removeDialogContainerFocusStyle() {
+                const container = dialog.shadowRoot?.querySelector(".dialog");
+
+                if (!container) {
+                    return;
+                }
+
+                container.style.removeProperty("outline");
+                container.style.removeProperty("outline-offset");
+                container.style.removeProperty("transition");
+                container.removeAttribute("tabindex");
+            }
+
+            function activateMode(mode) {
+                activeMode = mode;
+                setActionState(moveAction, mode === "move");
+                setActionState(resizeAction, mode === "resize");
+                dialog.setAttribute("data-keyboard-mode", mode);
+                dialog.setAttribute(
+                    "aria-label",
+                    `${mode === "move" ? "Move" : "Resize"} mode active`
+                );
+                const activeAction = mode === "move" ? moveAction : resizeAction;
+                activeAction.blur();
+                focusDialogContainer();
+                announce(
+                    `${mode === "move" ? "Move" : "Resize"} mode active. Use arrow keys to ${mode === "move" ? "adjust position" : "adjust size"}. Press Tab or Escape to exit.`
+                );
+            }
+
+            async function deactivateMode() {
+                const previousMode = activeMode;
+                activeMode = null;
+                setActionState(moveAction, false);
+                setActionState(resizeAction, false);
+                dialog.removeAttribute("data-keyboard-mode");
+                dialog.removeAttribute("aria-label");
+                getDialogContainer().blur();
+                await waitForNextFrame();
+                removeDialogContainerFocusStyle();
+                await focusDialogCloseButton();
+                announce(`Exited ${previousMode} mode.`);
+            }
+
+            function waitForNextFrame() {
+                return new Promise(function (resolve) {
+                    requestAnimationFrame(resolve);
+                });
+            }
+
+            function focusDialogCloseButton() {
+                return new Promise(function (resolve) {
+                    requestAnimationFrame(async function () {
+                        await closeAction.setFocus();
+                        headerFocusStep = 0;
+                        resolve();
+                    });
+                });
+            }
+
+            function getMaximumOffset(size, viewportSize) {
+                return Math.max(0, (viewportSize - size) / 2 - VIEWPORT_PADDING);
+            }
+
+            function keepDialogInViewport() {
+                const maximumX = getMaximumOffset(dialogWidth, window.innerWidth);
+                const maximumY = getMaximumOffset(dialogHeight, window.innerHeight);
+
+                dialogX = Math.max(-maximumX, Math.min(dialogX, maximumX));
+                dialogY = Math.max(-maximumY, Math.min(dialogY, maximumY));
+            }
+
+            function moveDialog(key) {
+                if (key === "ArrowLeft") {
+                    dialogX -= KEYBOARD_STEP;
+                } else if (key === "ArrowRight") {
+                    dialogX += KEYBOARD_STEP;
+                } else if (key === "ArrowUp") {
+                    dialogY -= KEYBOARD_STEP;
+                } else if (key === "ArrowDown") {
+                    dialogY += KEYBOARD_STEP;
+                }
+
+                keepDialogInViewport();
+                updateDialogGeometry();
+                announce(
+                    `Moved ${key.replace("Arrow", "").toLowerCase()}.`
+                );
+            }
+
+            function resizeDialog(key) {
+                const maximumWidth = Math.max(
+                    1,
+                    window.innerWidth - VIEWPORT_PADDING * 2
+                );
+                const maximumHeight = Math.max(
+                    1,
+                    window.innerHeight - VIEWPORT_PADDING * 2
+                );
+                const minimumWidth = Math.min(MINIMUM_WIDTH, maximumWidth);
+                const minimumHeight = Math.min(MINIMUM_HEIGHT, maximumHeight);
+
+                if (key === "ArrowLeft") {
+                    dialogWidth = Math.max(
+                        minimumWidth,
+                        dialogWidth - KEYBOARD_STEP
+                    );
+                } else if (key === "ArrowRight") {
+                    dialogWidth = Math.min(
+                        maximumWidth,
+                        dialogWidth + KEYBOARD_STEP
+                    );
+                } else if (key === "ArrowUp") {
+                    dialogHeight = Math.max(
+                        minimumHeight,
+                        dialogHeight - KEYBOARD_STEP
+                    );
+                } else if (key === "ArrowDown") {
+                    dialogHeight = Math.min(
+                        maximumHeight,
+                        dialogHeight + KEYBOARD_STEP
+                    );
+                }
+
+                keepDialogInViewport();
+                updateDialogGeometry();
+                const dimension =
+                    key === "ArrowLeft" || key === "ArrowRight"
+                        ? "width"
+                        : "height";
+                const direction =
+                    key === "ArrowLeft" || key === "ArrowUp"
+                        ? "smaller"
+                        : "larger";
+                announce(`Resized ${dimension} ${direction}.`);
+            }
+
+            function enlargeDialog(verticalOnly) {
+                const maximumWidth = Math.max(
+                    1,
+                    window.innerWidth - VIEWPORT_PADDING * 2
+                );
+                const maximumHeight = Math.max(
+                    1,
+                    window.innerHeight - VIEWPORT_PADDING * 2
+                );
+
+                if (!verticalOnly) {
+                    dialogWidth = Math.min(maximumWidth, dialogWidth + KEYBOARD_STEP);
+                }
+
+                dialogHeight = Math.min(maximumHeight, dialogHeight + KEYBOARD_STEP);
+                keepDialogInViewport();
+                updateDialogGeometry();
+                announce(
+                    verticalOnly
+                        ? "Resized height larger."
+                        : "Resized width and height larger."
+                );
+            }
+
+            openButton.addEventListener("click", async function () {
+                await customElements.whenDefined("calcite-dialog");
+                resetModeState();
+                dialog.open = true;
+            });
+
+            dialog.addEventListener("calciteDialogOpen", async function () {
+                await resetDialogGeometry();
+                await waitForNextFrame();
+                await focusDialogCloseButton();
+            });
+
+            dialog.addEventListener("calciteDialogClose", function () {
+                resetModeState();
+                openButton.focus();
+            });
+
+            function addModeActivation(action, mode) {
+                action.addEventListener("click", function () {
+                    if (mode === "move" && suppressMoveClick) {
+                        suppressMoveClick = false;
+                        return;
+                    }
+
+                    if (mode === "resize") {
+                        return;
+                    }
+
+                    activateMode(mode);
+                });
+
+                action.addEventListener("keydown", function (event) {
+                    if (event.key === " " || event.key === "Enter") {
+                        event.preventDefault();
+                        activateMode(mode);
+                    }
+                });
+            }
+
+            addModeActivation(moveAction, "move");
+            addModeActivation(resizeAction, "resize");
+
+            closeAction.addEventListener("click", function () {
+                dialog.open = false;
+            });
+
+            moveAction.addEventListener("focusin", function () {
+                headerFocusStep = 2;
+            });
+
+            resizeAction.addEventListener("focusin", function () {
+                headerFocusStep = 1;
+            });
+
+            moveAction.addEventListener("pointerdown", function (event) {
+                if (event.button !== 0) {
+                    return;
+                }
+
+                dragState = {
+                    pointerId: event.pointerId,
+                    clientX: event.clientX,
+                    clientY: event.clientY,
+                    moved: false
+                };
+                moveAction.setPointerCapture(event.pointerId);
+                moveAction.setAttribute("data-dragging", "");
+            });
+
+            moveAction.addEventListener("pointermove", function (event) {
+                if (!dragState || event.pointerId !== dragState.pointerId) {
+                    return;
+                }
+
+                const deltaX = event.clientX - dragState.clientX;
+                const deltaY = event.clientY - dragState.clientY;
+
+                if (deltaX === 0 && deltaY === 0) {
+                    return;
+                }
+
+                dragState.moved = true;
+                dragState.clientX = event.clientX;
+                dragState.clientY = event.clientY;
+                dialogX += deltaX;
+                dialogY += deltaY;
+                keepDialogInViewport();
+                updateDialogGeometry();
+            });
+
+            function endMoveDrag(event) {
+                if (!dragState || event.pointerId !== dragState.pointerId) {
+                    return;
+                }
+
+                suppressMoveClick = dragState.moved;
+                dragState = null;
+                moveAction.removeAttribute("data-dragging");
+            }
+
+            moveAction.addEventListener("pointerup", endMoveDrag);
+            moveAction.addEventListener("pointercancel", endMoveDrag);
+
+            resizeAction.addEventListener("click", function (event) {
+                enlargeDialog(event.shiftKey);
+            });
+
+            dialog.addEventListener("keydown", function (event) {
+                if (event.key === "Escape") {
+                    event.preventDefault();
+                    event.stopPropagation();
+
+                    if (activeMode) {
+                        deactivateMode();
+                    } else {
+                        dialog.open = false;
+                    }
+
+                    return;
+                }
+
+                if (event.key === "Tab" && activeMode) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    deactivateMode();
+                    return;
+                }
+
+                if (event.key === "Tab" && !event.shiftKey) {
+                    if (headerFocusStep === 0) {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        headerFocusStep = 1;
+                        resizeAction.setFocus();
+                        return;
+                    }
+
+                    if (headerFocusStep === 1) {
+                        const focusedAction = event
+                            .composedPath()
+                            .find(function (target) {
+                                return target === resizeAction;
+                            });
+
+                        if (focusedAction) {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            headerFocusStep = 2;
+                            moveAction.setFocus();
+                            return;
+                        }
+                    }
+                }
+
+                if (!event.key.startsWith("Arrow")) {
+                    return;
+                }
+
+                if (!activeMode) {
+                    const focusedAction = event
+                        .composedPath()
+                        .find(function (target) {
+                            return target === moveAction || target === resizeAction;
+                        });
+
+                    if (focusedAction) {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        const nextAction =
+                            focusedAction === moveAction
+                                ? resizeAction
+                                : moveAction;
+                        nextAction.setFocus();
+                        return;
+                    }
+
+                    event.stopPropagation();
+                    return;
+                }
+
+                event.preventDefault();
+                event.stopPropagation();
+
+                if (activeMode === "move") {
+                    moveDialog(event.key);
+                } else {
+                    resizeDialog(event.key);
+                }
+            }, true);
+
+            cancelButton.addEventListener("click", function () {
+                dialog.open = false;
+            });
+
+            agreeButton.addEventListener("click", function () {
+                dialog.open = false;
+            });
+
+            agreeButton.addEventListener("keydown", function (event) {
+                if (event.key === "Tab" && !event.shiftKey) {
+                    event.preventDefault();
+                    focusDialogCloseButton();
+                }
+            });
+
+            window.addEventListener("resize", function () {
+                const availableWidth = Math.max(
+                    1,
+                    window.innerWidth - VIEWPORT_PADDING * 2
+                );
+                const availableHeight = Math.max(
+                    1,
+                    window.innerHeight - VIEWPORT_PADDING * 2
+                );
+
+                dialogWidth = Math.min(
+                    dialogWidth,
+                    availableWidth
+                );
+                dialogHeight = Math.min(
+                    dialogHeight,
+                    availableHeight
+                );
+                keepDialogInViewport();
+                updateDialogGeometry();
+            });
+        </script>
+    </body>
+</html>
